@@ -36,6 +36,10 @@ dependencies:
   cupertino_icons: ^1.0.8
   http: ^1.6.0
   supabase_flutter: ^2.15.0
+  # Local notifications (focus/break end alerts with sound + vibration), and
+  # timezone support required by flutter_local_notifications' zonedSchedule.
+  flutter_local_notifications: ^18.0.1
+  timezone: ^0.9.4
 
 dev_dependencies:
   flutter_test:

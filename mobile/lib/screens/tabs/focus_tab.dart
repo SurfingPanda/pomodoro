@@ -61,6 +61,7 @@ class _FocusTabState extends State<FocusTab> {
       MaterialPageRoute(
         builder: (_) => TimerScreen(
           focusMinutes: _focusMinutes,
+          breakMinutes: _breakMinutes,
           task: _taskController.text.trim(),
         ),
       ),
