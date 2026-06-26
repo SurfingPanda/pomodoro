@@ -10,12 +10,13 @@ class AppConfig {
   static const String storageBucket = 'uploads';
 
   // --- Laravel data API ---
-  // Pick the value that matches where you run the app:
-  //   - Android emulator:        http://10.0.2.2:8000/api
-  //   - iOS simulator / desktop: http://127.0.0.1:8000/api
-  //   - Web (flutter run -d chrome): http://127.0.0.1:8000/api
-  //   - Physical device:         http://YOUR-COMPUTER-LAN-IP:8000/api
+  // Production: the deployed Laravel API on Render.
+  static const String apiBaseUrl = 'https://pomodoro-api-wvct.onrender.com/api';
   //
-  // Start the backend with:  php artisan serve  (in the backend/ folder)
-  static const String apiBaseUrl = 'http://10.0.2.2:8000/api';
+  // For local development, swap apiBaseUrl above for the value that matches
+  // where you run the app (and start the backend with `php artisan serve`):
+  //   - Android emulator:            http://10.0.2.2:8000/api
+  //   - iOS simulator / desktop:     http://127.0.0.1:8000/api
+  //   - Web (flutter run -d chrome): http://127.0.0.1:8000/api
+  //   - Physical device:             http://YOUR-COMPUTER-LAN-IP:8000/api
 }
