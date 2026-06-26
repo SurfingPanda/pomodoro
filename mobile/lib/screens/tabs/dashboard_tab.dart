@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../models/pomodoro_session.dart';
+import '../../services/app_settings.dart';
 import '../../services/auth_service.dart';
 import '../../services/pomodoro_service.dart';
 import '../../theme.dart';
@@ -26,6 +27,7 @@ class _DashboardTabState extends State<DashboardTab> {
   bool _loading = true;
   String? _error;
   PomodoroStats? _stats;
+  int _pending = 0;
 
   @override
   void initState() {
@@ -36,12 +38,19 @@ class _DashboardTabState extends State<DashboardTab> {
   Future<void> _refresh() async {
     setState(() => _error = null);
     try {
+      await _pomodoro.flushPending(); // push any sessions saved offline
       final stats = await _pomodoro.stats();
       if (mounted) setState(() => _stats = stats);
     } catch (_) {
       if (mounted) setState(() => _error = "Couldn't reach the API. Is the server running?");
     } finally {
-      if (mounted) setState(() => _loading = false);
+      final pending = await _pomodoro.pendingCount();
+      if (mounted) {
+        setState(() {
+          _pending = pending;
+          _loading = false;
+        });
+      }
     }
   }
 
@@ -72,6 +81,10 @@ class _DashboardTabState extends State<DashboardTab> {
               children: [
                 _greeting(),
                 const SizedBox(height: 16),
+                if (_pending > 0) ...[
+                  _pendingBanner(),
+                  const SizedBox(height: 14),
+                ],
                 if (_loading && _stats == null)
                   Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -119,7 +132,8 @@ class _DashboardTabState extends State<DashboardTab> {
   Widget _heroCard() {
     final mins = _stats?.todayMinutes ?? 0;
     final sessions = _stats?.todaySessions ?? 0;
-    final progress = (mins / kDailyGoalMinutes).clamp(0.0, 1.0);
+    final goal = AppSettings.instance.dailyGoalMinutes;
+    final progress = (mins / goal).clamp(0.0, 1.0);
     final pct = (progress * 100).round();
 
     return Container(
@@ -154,7 +168,7 @@ class _DashboardTabState extends State<DashboardTab> {
                     style: const TextStyle(
                         color: Colors.white, fontSize: 40, fontWeight: FontWeight.w800, height: 1)),
                 const SizedBox(height: 6),
-                Text('$sessions ${sessions == 1 ? 'session' : 'sessions'} · goal ${fmtMinutes(kDailyGoalMinutes)}',
+                Text('$sessions ${sessions == 1 ? 'session' : 'sessions'} · goal ${fmtMinutes(goal)}',
                     style: const TextStyle(color: Colors.white70, fontSize: 13)),
               ],
             ),
@@ -221,6 +235,28 @@ class _DashboardTabState extends State<DashboardTab> {
           ),
           const SizedBox(height: 2),
           Text(label, style: const TextStyle(color: AppColors.muted, fontSize: 11)),
+        ],
+      ),
+    );
+  }
+
+  Widget _pendingBanner() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: AppColors.streak.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.cloud_sync_rounded, color: AppColors.streak, size: 20),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              '$_pending ${_pending == 1 ? 'session' : 'sessions'} waiting to sync — pull to retry.',
+              style: const TextStyle(color: AppColors.ink, fontSize: 13, fontWeight: FontWeight.w600),
+            ),
+          ),
         ],
       ),
     );

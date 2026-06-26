@@ -6,8 +6,11 @@ import 'package:timezone/timezone.dart' as tz;
 ///
 /// Alerts are *scheduled* at the moment a phase starts (via [scheduleAlert]),
 /// not fired from the in-app countdown — so they ring even if the app is
-/// backgrounded or the screen is off, when the Dart timer is suspended. The
-/// channel is high-importance with the default system sound and vibration.
+/// backgrounded or the screen is off, when the Dart timer is suspended.
+///
+/// Sound and vibration are channel-level settings on Android 8+, so each
+/// (sound, vibration) combination uses its own high-importance channel; the
+/// caller picks one to honour the user's preferences.
 class NotificationService {
   NotificationService._();
   static final NotificationService instance = NotificationService._();
@@ -15,12 +18,8 @@ class NotificationService {
   final FlutterLocalNotificationsPlugin _plugin =
       FlutterLocalNotificationsPlugin();
 
-  static const String _channelId = 'focus_timer';
-  static const String _channelName = 'Focus timer';
-  static const String _channelDescription =
-      'Alerts when a focus session or break ends.';
-
   bool _initialized = false;
+  final Set<String> _createdChannels = {};
 
   /// Notification ids — stable so a new schedule replaces the previous one.
   static const int focusEndId = 1001;
@@ -42,20 +41,6 @@ class NotificationService {
     );
     await _plugin.initialize(
       const InitializationSettings(android: androidInit, iOS: darwinInit),
-    );
-
-    // Create the Android channel up front so its sound/vibration settings stick.
-    final androidImpl = _plugin.resolvePlatformSpecificImplementation<
-        AndroidFlutterLocalNotificationsPlugin>();
-    await androidImpl?.createNotificationChannel(
-      const AndroidNotificationChannel(
-        _channelId,
-        _channelName,
-        description: _channelDescription,
-        importance: Importance.max,
-        playSound: true,
-        enableVibration: true,
-      ),
     );
 
     _initialized = true;
@@ -83,33 +68,62 @@ class NotificationService {
     return true;
   }
 
-  static const NotificationDetails _details = NotificationDetails(
-    android: AndroidNotificationDetails(
-      _channelId,
-      _channelName,
-      channelDescription: _channelDescription,
+  String _channelId(bool sound, bool vibration) =>
+      'focus_timer_s${sound ? 1 : 0}_v${vibration ? 1 : 0}';
+
+  Future<AndroidNotificationDetails> _androidDetails(
+      bool sound, bool vibration) async {
+    final id = _channelId(sound, vibration);
+    final name = 'Focus timer'
+        '${sound ? '' : ' (silent)'}${vibration ? '' : ' (no vibration)'}';
+    if (!_createdChannels.contains(id)) {
+      final androidImpl = _plugin.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+      await androidImpl?.createNotificationChannel(
+        AndroidNotificationChannel(
+          id,
+          name,
+          description: 'Alerts when a focus session or break ends.',
+          importance: Importance.max,
+          playSound: sound,
+          enableVibration: vibration,
+        ),
+      );
+      _createdChannels.add(id);
+    }
+    return AndroidNotificationDetails(
+      id,
+      name,
+      channelDescription: 'Alerts when a focus session or break ends.',
       importance: Importance.max,
       priority: Priority.high,
       category: AndroidNotificationCategory.alarm,
-      playSound: true,
-      enableVibration: true,
-    ),
-    iOS: DarwinNotificationDetails(
-      presentAlert: true,
-      presentSound: true,
-      interruptionLevel: InterruptionLevel.timeSensitive,
-    ),
-  );
+      playSound: sound,
+      enableVibration: vibration,
+    );
+  }
 
   /// Schedule an alert to fire at [when]. Uses an exact alarm so the timer is
-  /// punctual; replaces any existing alert with the same [id].
+  /// punctual; replaces any existing alert with the same [id]. [playSound] and
+  /// [vibrate] honour the user's notification preferences.
   Future<void> scheduleAlert({
     required int id,
     required DateTime when,
     required String title,
     required String body,
+    bool playSound = true,
+    bool vibrate = true,
   }) async {
     await init();
+    final android = await _androidDetails(playSound, vibrate);
+    final details = NotificationDetails(
+      android: android,
+      iOS: DarwinNotificationDetails(
+        presentAlert: true,
+        presentSound: playSound,
+        interruptionLevel: InterruptionLevel.timeSensitive,
+      ),
+    );
     // Schedule by absolute instant in UTC — fires at the right wall-clock time
     // regardless of the device's named timezone.
     final scheduled = tz.TZDateTime.from(when.toUtc(), tz.UTC);
@@ -118,7 +132,7 @@ class NotificationService {
       title,
       body,
       scheduled,
-      _details,
+      details,
       androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
       uiLocalNotificationDateInterpretation:
           UILocalNotificationDateInterpretation.absoluteTime,

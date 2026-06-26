@@ -40,6 +40,8 @@ dependencies:
   # timezone support required by flutter_local_notifications' zonedSchedule.
   flutter_local_notifications: ^18.0.1
   timezone: ^0.9.4
+  # Local persistence for user preferences (auto-start, sound, daily goal).
+  shared_preferences: ^2.3.2
 
 dev_dependencies:
   flutter_test:

@@ -3,31 +3,40 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../services/app_settings.dart';
 import '../services/notification_service.dart';
 import '../services/pomodoro_service.dart';
 import '../theme.dart';
+import '../utils.dart';
 import '../widgets/primary_button.dart';
 
-enum _Phase { focus, breakTime, done }
+enum _Phase { focus, breakTime, awaitingFocus, done }
 
-/// The immersive focus countdown. Started from [FocusTab] with a chosen focus
-/// duration, break duration, and optional task; it runs full-screen (no bottom
-/// nav) to keep the user undistracted.
+/// The immersive focus countdown. Started from [FocusTab] with focus/break
+/// durations, a cycle length, and an optional task; it runs full-screen (no
+/// bottom nav) to keep the user undistracted.
 ///
-/// Flow: focus → break → done. When the focus phase ends the session is
-/// auto-logged via the API; the break then counts down automatically. Each
-/// phase boundary fires a notification (with sound + vibration) scheduled at
-/// phase start, so alerts ring even if the app is backgrounded or the screen is
-/// off. On finish it pops `true` so callers can refresh.
+/// Flow: focus → break → focus → … with a *long* break after every
+/// [sessionsPerCycle] focus blocks. Each completed focus block is logged via
+/// the API. Whether the next focus auto-starts after a break is controlled by
+/// [AppSettings.autoStartNext]; otherwise the user confirms from an interstitial.
+///
+/// Each phase boundary fires a notification (sound + vibration per the user's
+/// [AppSettings]) scheduled at phase start, so alerts ring even when the app is
+/// backgrounded or the screen is off.
 class TimerScreen extends StatefulWidget {
   final int focusMinutes;
   final int breakMinutes;
+  final int longBreakMinutes;
+  final int sessionsPerCycle;
   final String task;
 
   const TimerScreen({
     super.key,
     required this.focusMinutes,
     this.breakMinutes = 0,
+    this.longBreakMinutes = 0,
+    this.sessionsPerCycle = 4,
     this.task = '',
   });
 
@@ -38,6 +47,7 @@ class TimerScreen extends StatefulWidget {
 class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
   final _pomodoro = PomodoroService();
   final _notifications = NotificationService.instance;
+  final _settings = AppSettings.instance;
 
   _Phase _phase = _Phase.focus;
 
@@ -45,14 +55,16 @@ class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
   int _remaining = 0;
   bool _running = false;
   Timer? _timer;
+  DateTime? _endTime; // wall-clock end of the current phase; null while paused
 
-  // Wall-clock instant the current phase should end while running. Remaining is
-  // derived from this so the countdown stays accurate across app backgrounding
-  // (where the periodic timer is suspended). Null while paused.
-  DateTime? _endTime;
+  // Cycle tracking.
+  int _round = 0; // current focus block number (1-based), increments each focus
+  bool _longBreakNext = false; // is the break after the current focus a long one
+  int _completedFocus = 0; // focus blocks finished + logged this run
+  int _completedMinutes = 0;
 
   bool _logging = false;
-  bool _logFailed = false;
+  int _offlineCount = 0; // focus blocks queued offline (sync pending)
 
   static const int _secondsPerMinute = 60;
 
@@ -61,16 +73,13 @@ class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _notifications.requestPermissions();
-    _totalSeconds = widget.focusMinutes * _secondsPerMinute;
-    _remaining = _totalSeconds;
-    _resume();
+    _startFocus();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _timer?.cancel();
-    // Leaving the screen before finishing — drop any pending scheduled alerts.
     if (_phase != _Phase.done) _notifications.cancelAll();
     super.dispose();
   }
@@ -85,14 +94,53 @@ class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
   int get _notificationId =>
       _phase == _Phase.focus ? NotificationService.focusEndId : NotificationService.breakEndId;
 
-  void _resume() {
+  bool get _hasBreak => widget.breakMinutes > 0;
+
+  // --- Phase transitions ---------------------------------------------------
+
+  void _startFocus() {
+    _round++;
+    _longBreakNext =
+        widget.sessionsPerCycle > 0 && _round % widget.sessionsPerCycle == 0;
+    setState(() {
+      _phase = _Phase.focus;
+      _totalSeconds = widget.focusMinutes * _secondsPerMinute;
+      _remaining = _totalSeconds;
+    });
+    _beginCountdown();
+  }
+
+  void _startBreak() {
+    final minutes = _longBreakNext ? widget.longBreakMinutes : widget.breakMinutes;
+    setState(() {
+      _phase = _Phase.breakTime;
+      _totalSeconds = minutes * _secondsPerMinute;
+      _remaining = _totalSeconds;
+    });
+    _beginCountdown();
+  }
+
+  /// What happens once a break finishes (or is skipped): either auto-start the
+  /// next focus block, or wait for the user to confirm.
+  void _afterBreak() {
+    if (_settings.autoStartNext) {
+      _startFocus();
+    } else {
+      setState(() {
+        _phase = _Phase.awaitingFocus;
+        _running = false;
+        _endTime = null;
+      });
+    }
+  }
+
+  void _beginCountdown() {
     _timer?.cancel();
     final end = DateTime.now().add(Duration(seconds: _remaining));
     setState(() {
       _running = true;
       _endTime = end;
     });
-    // (Re)schedule this phase's end alert for the new end time.
     _scheduleCurrentAlert(end);
     _timer = Timer.periodic(const Duration(seconds: 1), (_) => _tick());
   }
@@ -108,93 +156,85 @@ class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
     }
   }
 
+  Future<void> _onPhaseEnd() async {
+    _timer?.cancel();
+    if (_settings.vibrationEnabled) HapticFeedback.heavyImpact();
+    if (_phase == _Phase.focus) {
+      await _logSession();
+      if (!mounted) return;
+      _completedFocus++;
+      _completedMinutes += widget.focusMinutes;
+      if (_hasBreak) {
+        _startBreak();
+      } else {
+        _afterBreak();
+      }
+    } else {
+      _afterBreak();
+    }
+  }
+
+  void _scheduleCurrentAlert(DateTime end) {
+    final sound = _settings.soundEnabled;
+    final vibrate = _settings.vibrationEnabled;
+    if (_phase == _Phase.focus) {
+      final next = !_hasBreak
+          ? 'Nice work — you stayed focused!'
+          : _longBreakNext
+              ? 'Great cycle! Time for a long break.'
+              : 'Nice work! Time for a ${widget.breakMinutes}-minute break.';
+      _notifications.scheduleAlert(
+        id: NotificationService.focusEndId,
+        when: end,
+        title: 'Focus session complete 🎉',
+        body: next,
+        playSound: sound,
+        vibrate: vibrate,
+      );
+    } else if (_phase == _Phase.breakTime) {
+      _notifications.scheduleAlert(
+        id: NotificationService.breakEndId,
+        when: end,
+        title: _longBreakNext ? 'Long break over ⏰' : 'Break over ⏰',
+        body: 'Ready for another focused session?',
+        playSound: sound,
+        vibrate: vibrate,
+      );
+    }
+  }
+
+  Future<void> _logSession() async {
+    setState(() => _logging = true);
+    final outcome = await _pomodoro.logOrQueue(
+      task: widget.task,
+      durationMinutes: widget.focusMinutes,
+    );
+    if (!mounted) return;
+    setState(() {
+      _logging = false;
+      if (outcome == LogOutcome.queued) _offlineCount++;
+    });
+  }
+
+  // --- User actions --------------------------------------------------------
+
   void _pause() {
     _timer?.cancel();
     setState(() {
       _running = false;
       _endTime = null;
     });
-    // Pausing invalidates the scheduled end time; cancel until resumed.
     _notifications.cancel(_notificationId);
   }
 
-  void _scheduleCurrentAlert(DateTime end) {
-    if (_phase == _Phase.focus) {
-      _notifications.scheduleAlert(
-        id: NotificationService.focusEndId,
-        when: end,
-        title: 'Focus session complete 🎉',
-        body: widget.breakMinutes > 0
-            ? 'Nice work! Time for a ${widget.breakMinutes}-minute break.'
-            : 'Nice work — you stayed focused!',
-      );
-    } else if (_phase == _Phase.breakTime) {
-      _notifications.scheduleAlert(
-        id: NotificationService.breakEndId,
-        when: end,
-        title: 'Break over ⏰',
-        body: 'Ready for another focused session?',
-      );
-    }
-  }
-
-  Future<void> _onPhaseEnd() async {
-    _timer?.cancel();
-    HapticFeedback.heavyImpact();
-    if (_phase == _Phase.focus) {
-      await _logSession();
-      if (!mounted) return;
-      if (widget.breakMinutes > 0) {
-        _startBreak();
-      } else {
-        setState(() {
-          _phase = _Phase.done;
-          _running = false;
-          _endTime = null;
-        });
-      }
-    } else {
-      // Break finished.
-      setState(() {
-        _phase = _Phase.done;
-        _running = false;
-        _endTime = null;
-      });
-    }
-  }
-
-  void _startBreak() {
-    setState(() {
-      _phase = _Phase.breakTime;
-      _totalSeconds = widget.breakMinutes * _secondsPerMinute;
-      _remaining = _totalSeconds;
-    });
-    _resume();
-  }
-
-  Future<void> _logSession() async {
-    setState(() {
-      _logging = true;
-      _logFailed = false;
-    });
-    try {
-      await _pomodoro.log(
-        task: widget.task,
-        durationMinutes: widget.focusMinutes,
-      );
-    } catch (_) {
-      if (mounted) setState(() => _logFailed = true);
-    } finally {
-      if (mounted) setState(() => _logging = false);
-    }
-  }
+  void _resume() => _beginCountdown();
 
   Future<void> _giveUp() async {
     final confirm = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('Give up this session?'),
-        content: const Text("It won't be logged."),
+        content: const Text("This focus block won't be logged."),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -211,18 +251,20 @@ class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
     if (confirm == true && mounted) {
       _timer?.cancel();
       _notifications.cancelAll();
-      Navigator.of(context).pop(false);
+      Navigator.of(context).pop(_completedFocus > 0);
     }
   }
 
   void _skipBreak() {
     _timer?.cancel();
     _notifications.cancel(NotificationService.breakEndId);
-    setState(() {
-      _phase = _Phase.done;
-      _running = false;
-      _endTime = null;
-    });
+    _afterBreak();
+  }
+
+  void _finish() {
+    _timer?.cancel();
+    _notifications.cancelAll();
+    setState(() => _phase = _Phase.done);
   }
 
   String get _formatted {
@@ -251,6 +293,7 @@ class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
             child: switch (_phase) {
               _Phase.focus => _runningView(isBreak: false),
               _Phase.breakTime => _runningView(isBreak: true),
+              _Phase.awaitingFocus => _awaitingView(),
               _Phase.done => _doneView(),
             },
           ),
@@ -265,12 +308,12 @@ class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
     final progress = _totalSeconds == 0 ? 0.0 : _remaining / _totalSeconds;
     final ringColor = isBreak ? AppColors.streak : AppColors.accent;
     final task = widget.task;
-    final statusLabel = _running
-        ? (isBreak ? 'on a break…' : 'focusing…')
-        : 'paused';
+    final statusLabel = _running ? (isBreak ? 'on a break…' : 'focusing…') : 'paused';
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
+        _phaseBadge(isBreak: isBreak),
+        const SizedBox(height: 18),
         SizedBox(
           width: 260,
           height: 260,
@@ -302,8 +345,7 @@ class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
                   if (isBreak)
                     const Padding(
                       padding: EdgeInsets.only(bottom: 4),
-                      child: Icon(Icons.local_cafe_rounded,
-                          color: AppColors.streak, size: 28),
+                      child: Icon(Icons.local_cafe_rounded, color: AppColors.streak, size: 28),
                     ),
                   Text(_formatted,
                       style: const TextStyle(
@@ -312,8 +354,7 @@ class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
                         color: AppColors.ink,
                         fontFeatures: [FontFeature.tabularFigures()],
                       )),
-                  Text(statusLabel,
-                      style: const TextStyle(color: AppColors.muted)),
+                  Text(statusLabel, style: const TextStyle(color: AppColors.muted)),
                 ],
               ),
             ],
@@ -322,12 +363,10 @@ class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
         const SizedBox(height: 20),
         if (isBreak)
           const Text('Step away and recharge 🐼',
-              style: TextStyle(
-                  fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.ink))
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.ink))
         else if (task.isNotEmpty)
           Text(task,
-              style: const TextStyle(
-                  fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.ink)),
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.ink)),
         const SizedBox(height: 32),
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -360,6 +399,57 @@ class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
     );
   }
 
+  /// Small pill above the ring showing round progress / break type.
+  Widget _phaseBadge({required bool isBreak}) {
+    final String text;
+    if (isBreak) {
+      text = _longBreakNext ? 'Long break' : 'Short break';
+    } else {
+      text = 'Focus $_round of ${widget.sessionsPerCycle}';
+    }
+    final color = isBreak ? AppColors.streak : AppColors.accent;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(color: color, fontWeight: FontWeight.w700, fontSize: 12.5),
+      ),
+    );
+  }
+
+  // --- Awaiting next focus (auto-start off) --------------------------------
+
+  Widget _awaitingView() {
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        const Icon(Icons.self_improvement_rounded, size: 64, color: AppColors.streak),
+        const SizedBox(height: 16),
+        const Text('Break complete',
+            style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800, color: AppColors.ink)),
+        const SizedBox(height: 8),
+        Text('$_completedFocus focus ${_completedFocus == 1 ? 'block' : 'blocks'} done so far. '
+            'Ready for the next one?',
+            textAlign: TextAlign.center, style: const TextStyle(color: AppColors.muted)),
+        const SizedBox(height: 32),
+        SizedBox(
+          width: 220,
+          child: PrimaryButton(label: 'Start next focus', onPressed: _startFocus),
+        ),
+        const SizedBox(height: 8),
+        TextButton(
+          onPressed: _finish,
+          style: TextButton.styleFrom(foregroundColor: AppColors.muted),
+          child: const Text('Finish for now'),
+        ),
+      ],
+    );
+  }
+
   // --- Done ----------------------------------------------------------------
 
   Widget _doneView() {
@@ -373,12 +463,17 @@ class _TimerScreenState extends State<TimerScreen> with WidgetsBindingObserver {
         const SizedBox(height: 8),
         if (_logging)
           const Text('Saving…', style: TextStyle(color: AppColors.muted))
-        else if (_logFailed)
-          const Text('Saved locally, but logging to the server failed.',
+        else if (_offlineCount > 0)
+          const Text("Saved offline — we'll sync automatically when you're back online. 🐼",
               textAlign: TextAlign.center, style: TextStyle(color: AppColors.muted))
         else
-          Text('Logged ${widget.focusMinutes} minutes of focus. Nice work! 🐼',
-              textAlign: TextAlign.center, style: const TextStyle(color: AppColors.muted)),
+          Text(
+            _completedFocus <= 1
+                ? 'Logged ${widget.focusMinutes} minutes of focus. Nice work! 🐼'
+                : 'Logged $_completedFocus focus blocks · ${fmtMinutes(_completedMinutes)}. Nice work! 🐼',
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: AppColors.muted),
+          ),
         const SizedBox(height: 32),
         SizedBox(
           width: 200,

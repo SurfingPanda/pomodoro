@@ -62,6 +62,8 @@ class _FocusTabState extends State<FocusTab> {
         builder: (_) => TimerScreen(
           focusMinutes: _focusMinutes,
           breakMinutes: _breakMinutes,
+          longBreakMinutes: math.min(_breakMinutes * 3, 30),
+          sessionsPerCycle: _sessionsPerCycle,
           task: _taskController.text.trim(),
         ),
       ),

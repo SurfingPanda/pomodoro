@@ -1,11 +1,26 @@
 import 'package:flutter/material.dart';
 
+import '../../services/app_settings.dart';
 import '../../services/auth_service.dart';
 import '../../theme.dart';
+import '../../utils.dart';
 import '../../widgets/panda_logo.dart';
+import '../settings_screen.dart';
 
-class ProfileTab extends StatelessWidget {
+class ProfileTab extends StatefulWidget {
   const ProfileTab({super.key});
+
+  @override
+  State<ProfileTab> createState() => _ProfileTabState();
+}
+
+class _ProfileTabState extends State<ProfileTab> {
+  Future<void> _openSettings() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const SettingsScreen()),
+    );
+    if (mounted) setState(() {}); // reflect any goal change on return
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -52,8 +67,13 @@ class ProfileTab extends StatelessWidget {
               ),
               const SizedBox(height: 28),
               _section([
+                _row(Icons.tune_rounded, 'Settings', 'Auto-start, alerts, daily goal',
+                    onTap: _openSettings),
+              ]),
+              const SizedBox(height: 16),
+              _section([
                 _row(Icons.verified_user_outlined, 'Authentication', 'Supabase Auth'),
-                _row(Icons.flag_outlined, 'Daily goal', '${kDailyGoalMinutes ~/ 60}h ${kDailyGoalMinutes % 60}m'),
+                _row(Icons.flag_outlined, 'Daily goal', fmtMinutes(AppSettings.instance.dailyGoalMinutes)),
                 _row(Icons.cloud_outlined, 'Data', 'Laravel API · Supabase Postgres'),
               ]),
               const SizedBox(height: 16),
@@ -95,8 +115,8 @@ class ProfileTab extends StatelessWidget {
     );
   }
 
-  Widget _row(IconData icon, String label, String value) {
-    return Padding(
+  Widget _row(IconData icon, String label, String value, {VoidCallback? onTap}) {
+    final content = Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       child: Row(
         children: [
@@ -113,8 +133,18 @@ class ProfileTab extends StatelessWidget {
                 textAlign: TextAlign.right,
                 style: const TextStyle(color: AppColors.muted, fontSize: 13)),
           ),
+          if (onTap != null) ...[
+            const SizedBox(width: 6),
+            const Icon(Icons.chevron_right_rounded, size: 20, color: AppColors.muted),
+          ],
         ],
       ),
+    );
+    if (onTap == null) return content;
+    return InkWell(
+      borderRadius: BorderRadius.circular(20),
+      onTap: onTap,
+      child: content,
     );
   }
 }
