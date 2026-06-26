@@ -1,0 +1,50 @@
+# Render Blueprint — deploys the Laravel API in backend/ as a Docker web service.
+# In Render: New > Blueprint, point it at this repo. Values marked `sync: false`
+# are NOT in git — set them in the Render dashboard (see backend/.env.production.example).
+services:
+  - type: web
+    name: pomodoro-api
+    runtime: docker
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: oregon
+    healthCheckPath: /up
+    autoDeploy: true
+    envVars:
+      - key: APP_NAME
+        value: Pomodoro
+      - key: APP_ENV
+        value: production
+      - key: APP_DEBUG
+        value: "false"
+      - key: APP_KEY        # php artisan key:generate --show  → paste the base64:... value
+        sync: false
+      - key: APP_URL        # your Render URL, e.g. https://pomodoro-api.onrender.com
+        sync: false
+      - key: LOG_CHANNEL
+        value: stderr       # logs show up in the Render dashboard
+      - key: SESSION_DRIVER
+        value: array        # token-auth API; no server sessions needed
+      - key: CACHE_STORE
+        value: file
+      - key: QUEUE_CONNECTION
+        value: sync
+      - key: DB_CONNECTION
+        value: pgsql
+      - key: DB_HOST        # Supabase session pooler host
+        sync: false
+      - key: DB_PORT
+        sync: false
+      - key: DB_DATABASE
+        sync: false
+      - key: DB_USERNAME
+        sync: false
+      - key: DB_PASSWORD
+        sync: false
+      - key: DB_SSLMODE
+        value: require
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false

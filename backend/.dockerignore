@@ -1,0 +1,15 @@
+# Keep build context small and secrets out of the image.
+.env
+.env.*
+vendor
+node_modules
+storage/logs/*
+storage/framework/cache/*
+storage/framework/sessions/*
+storage/framework/views/*
+.git
+.idea
+.vscode
+tests
+*.md
+database/database.sqlite

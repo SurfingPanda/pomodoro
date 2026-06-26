@@ -1,0 +1,5 @@
+# Local Claude Code config / memory — never push.
+.claude/
+
+# Local backend scaffolding DB (not the app database).
+backend/database/database.sqlite
